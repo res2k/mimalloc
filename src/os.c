@@ -215,78 +215,15 @@ void _mi_os_init() {
 }
 #else
 #if defined(__linux__) && defined(__x86_64__)
-#include <elf.h>
+#include <dlfcn.h>
 #include <sys/auxv.h>
 typedef int (*getcpu_vdso_t)(unsigned*, unsigned*, void*);
 static getcpu_vdso_t mi_os_getcpu_vdso = NULL;
-static struct vdso_info {
-  uintptr_t load_addr, load_offset;
-  Elf64_Sym *symtab; // ELF symbol table
-  const char *symstrings;
-  void *bucket, *chain;
-  Elf64_Word nbucket;
-} vdso_info;
 static void mi_os_vdso_init(void) {
-  unsigned long base = getauxval(AT_SYSINFO_EHDR);
-  if (!base)
+  void* vdso_base = (void*)getauxval(AT_SYSINFO_EHDR);
+  if(!vdso_base)
     return;
-  bool found_vaddr = false;
-  vdso_info.load_addr = base;
-  Elf64_Ehdr* hdr = (Elf64_Ehdr*)base;
-  if (hdr->e_ident[EI_CLASS] != ELFCLASS64)
-    return;
-  Elf64_Phdr* pt = (Elf64_Phdr*)(vdso_info.load_addr + hdr->e_phoff);
-  Elf64_Dyn* dyn = 0;
-  // we need to load offset and the dynamic table from the segment table
-  for (size_t i = 0; i < hdr->e_phnum; i++) {
-    if (pt[i].p_type == PT_LOAD && !found_vaddr) {
-      found_vaddr = true;
-      vdso_info.load_offset = base + (uintptr_t)pt[i].p_offset - (uintptr_t)pt[i].p_vaddr;
-    } else if (pt[i].p_type == PT_DYNAMIC) {
-      dyn = (Elf64_Dyn*)(base + pt[i].p_offset);
-    }
-  }
-  if (!found_vaddr || !dyn)
-    return;
-  Elf64_Word* hash = 0;
-  vdso_info.symstrings = NULL;
-  vdso_info.symtab = NULL;
-  for (size_t i = 0; dyn[i].d_tag != DT_NULL; i++) {
-    switch (dyn[i].d_tag) {
-    case DT_STRTAB:
-      vdso_info.symstrings = (const char*)((uintptr_t)dyn[i].d_un.d_ptr + vdso_info.load_offset);
-      break;
-    case DT_SYMTAB:
-      vdso_info.symtab = (Elf64_Sym*)((uintptr_t)dyn[i].d_un.d_ptr + vdso_info.load_offset);
-      break;
-    case DT_HASH:
-      hash = (Elf64_Word*)((uintptr_t)dyn[i].d_un.d_ptr + vdso_info.load_offset);
-      break;
-    }
-  }
-  if (!vdso_info.symstrings || !vdso_info.symtab || !hash)
-    return;
-  vdso_info.nbucket = hash[0];
-  vdso_info.bucket = &hash[2];
-  vdso_info.chain = &hash[vdso_info.nbucket + 2];
-}
-static void* mi_os_vdso_get_sym(void) {
-  const char *name = "__vdso_getcpu";
-  Elf64_Word chain = ((Elf64_Word*)vdso_info.bucket)[11538501 % vdso_info.nbucket];
-  for (; chain != STN_UNDEF; chain = ((Elf64_Word*)vdso_info.chain)[chain]) {
-    Elf64_Sym* sym = &vdso_info.symtab[chain];
-    // Check for a defined global or weak function with right name
-    if (ELF64_ST_TYPE(sym->st_info) != STT_FUNC)
-      continue;
-    if (ELF64_ST_BIND(sym->st_info) != STB_GLOBAL && ELF64_ST_BIND(sym->st_info) != STB_WEAK)
-      continue;
-    if (sym->st_shndx == SHN_UNDEF)
-      continue;
-    if (strcmp(name, vdso_info.symstrings + sym->st_name))
-      continue;
-    return (void*)(vdso_info.load_offset + sym->st_value);
-  }
-  return 0;
+  mi_os_getcpu_vdso = (getcpu_vdso_t)dlsym(vdso_base, "__vdso_getcpu");
 }
 #endif
 void _mi_os_init() {
@@ -300,7 +237,6 @@ void _mi_os_init() {
 #if defined(__linux__) && defined(__x86_64__)
   // set up symbols exported by vDSO (virtual dynamic shared object)
   mi_os_vdso_init();
-  mi_os_getcpu_vdso = (getcpu_vdso_t)mi_os_vdso_get_sym();
 #endif
 }
 #endif
